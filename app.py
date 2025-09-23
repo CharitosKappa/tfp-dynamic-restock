@@ -506,4 +506,28 @@ if run_btn:
         st.write({
             "Chosen SALES column for Color": sales_line_col,
             "Rows with Color from SALES by Variant": int(from_sales_variant.sum()),
-            "Rows with Color from SALE
+            "Rows with Color from SALES by Our Code": int(from_sales_our.sum()),
+            "Rows with Color from STOCK fallback": int(from_stock_fb.sum()),
+            "Non-null counts": out[["Vendor","Vendor Code","Color"]].notna().sum().to_dict(),
+        })
+        try:
+            if sales_line_col:
+                sample_sales = sales[[sales_line_col]].head(12).copy()
+                sample_sales["Extracted Color"] = sample_sales[sales_line_col].apply(extract_color_from_sales_line)
+                st.write("Sales color samples:", sample_sales)
+        except Exception:
+            pass
+
+    st.success("Done! Preview below ↓")
+    st.dataframe(out, use_container_width=True)
+
+    # Download
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        out.to_excel(writer, index=False, sheet_name="Restock v12")
+    st.download_button(
+        label="⬇️ Download dynamic_restock_order_v12.xlsx",
+        data=buffer.getvalue(),
+        file_name="dynamic_restock_order_v12.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
