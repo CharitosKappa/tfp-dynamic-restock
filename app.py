@@ -3,7 +3,7 @@
 # Vendor / Vendor Code / Color mapped EXCLUSIVELY from STOCK
 #   Vendor  (export col A) <- Stock['Brand']   (per Our Code)
 #   Vendor Code (col B)    <- Stock['Vendor Code'] OR Stock['Vendors/Vendor Product Code'] (per Our Code)
-#   Color  (col C)         <- parse after "Χρώμα:" (or "Color:") from Stock['Variant Values'] (per Our Code)
+#   Color  (col C)         <- robust parse after "Χρώμα:" (or "Color:") from Stock['Variant Values'] (per Our Code)
 # SALES χρησιμοποιείται μόνο για ποσότητες (Qty Ordered).
 # Requirements: streamlit, pandas, numpy, openpyxl
 
@@ -13,8 +13,8 @@ import pandas as pd
 import streamlit as st
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Dynamic Restock v13", page_icon="📦", layout="wide")
-st.title("📦 Dynamic Restock v13")
+st.set_page_config(page_title="Dynamic Restock v12", page_icon="📦", layout="wide")
+st.title("📦 Dynamic Restock v12")
 st.caption("Upload Stock + Sales → dynamic restock. Vendor / Code / Color are mapped from STOCK.")
 
 # ---------------- Helpers ----------------
@@ -44,22 +44,59 @@ def extract_color_after_keyword(text):
     """
     Επιστρέφει το χρώμα από κείμενο τύπου:
       "Χρώμα: Ταμπά  Μεγέθη γυναικεία παπούτσια: 36"
-    Κόβει ακριβώς μετά το Χρώμα:/Color: μέχρι να συναντήσει 'Μεγέθη' ή διαχωριστικό ή τέλος.
+    Ανθεκτικό σε:
+      - ΧΡΩΜΑ / Χρώμα / Color (με/χωρίς ':')
+      - έξτρα κενά, διαφορετικά διαχωριστικά (, ; |)
+      - τερματισμό πριν από 'Μεγ...' (Μεγέθη/Μέγεθος), 'Size/Sizes/Taille', διαχωριστικά ή τέλος γραμμής
     """
     if pd.isna(text):
         return None
-    s = str(text)
-    # ομογενοποίηση κενών
-    s = re.sub(r"\s+", " ", s).strip()
-    # κύριο regex
+
+    original = str(text)
+    # Ομογενοποίηση κενών
+    s = re.sub(r"\s+", " ", original).strip()
+
+    # 1) Πιάσε ό,τι έπεται του "Χρώμα"/"Color" μέχρι πριν από 'Μεγ...' ή γνωστά διαχωριστικά
     m = re.search(
-        r"(?:Χρώμα|Color)\s*[:：]?\s*"       # λέξη-κλειδί + προαιρετική άνω-κάτω τελεία
-        r"(.+?)"                            # πιάσε το ίδιο το χρώμα (lazy)
-        r"(?=\s*(?:Μεγέθη|Sizes?|Taille|Μέγεθος|,|;|\||$))",  # σταματά πριν από αυτά
-        s, flags=re.IGNORECASE
+        r"(?:Χρώμα|ΧΡΩΜΑ|Color)\s*[:：]?\s*"
+        r"(.+?)"
+        r"(?=\s*(?:Μεγ[\wΆ-ώ]+|Sizes?|Size|Taille|,|;|\||$))",
+        s,
+        flags=re.IGNORECASE
     )
-    color = m.group(1).strip() if m else None
+    if not m:
+        # 2) Fallback: αν δεν βρέθηκε, δοκίμασε να κόψεις χειροκίνητα ανάμεσα σε 'Χρώμα' και 'Μεγ.../Size...'
+        # Βρες αρχή (keyword)
+        start = None
+        for kw in ["Χρώμα", "ΧΡΩΜΑ", "Color"]:
+            idx = s.lower().find(kw.lower())
+            if idx != -1:
+                # Μετακίνησε μετά από "Χρώμα" (+ προαιρετικό ':')
+                after = s[idx + len(kw):]
+                after = after.lstrip(" :：")
+                start = after
+                break
+        if start is not None:
+            # Κόψε στο πρώτο delimiter
+            end_delims = ["|", ",", ";"]
+            # βρες 'Μεγ...' / 'Size...' / 'Taille'
+            end_idx = None
+            for token in [" Μεγ", " μεγ", " Size", " size", " Sizes", " sizes", " Taille", " taille"]:
+                pos = start.find(token)
+                if pos != -1:
+                    end_idx = pos if end_idx is None else min(end_idx, pos)
+            for d in end_delims:
+                pos = start.find(d)
+                if pos != -1:
+                    end_idx = pos if end_idx is None else min(end_idx, pos)
+            color = start[:end_idx].strip() if end_idx is not None else start.strip()
+        else:
+            color = None
+    else:
+        color = m.group(1).strip()
+
     if color:
+        # Καθάρισε τυχόν ουρά/εισαγωγικά
         color = re.sub(r"[\s,;|]+$", "", color).strip()
         color = color.strip(' "\'“”‘’')
     return color if color else None
@@ -168,15 +205,14 @@ if run_btn:
         ("Vendors/Vendor Product Code" if "Vendors/Vendor Product Code" in stock.columns else
          find_any_col(stock, [["vendors","vendor","product","code"],["vendor","product","code"],["vendorcode"]]))
     )
-    # Color από Variant Values ('Χρώμα:' / 'Color:')
-    color_text_col_stock = vv_col_stock
+    color_text_col_stock = vv_col_stock  # θα εξάγουμε από εδώ το Color
 
     # forward-fill ώστε οι γραμμές με τα μεγέθη να κληρονομούν τα header rows
     for c in [brand_col, vendor_code_col_stock, color_text_col_stock]:
         if c and c in stock.columns:
             stock[c] = stock[c].ffill()
 
-    # χτίζουμε χάρτη ανά Our Code
+    # Χτίζουμε χάρτη ανά Our Code
     cols_for_stock_map = ["Our Code"]
     rename_map = {}
     if brand_col:
@@ -347,8 +383,13 @@ if run_btn:
             },
             "Non-null (Vendor/Code/Color)": out[["Vendor","Vendor Code","Color"]].notna().sum().to_dict(),
         })
-        # Optional sample rows for quick visual check
-        st.write(out[["Our Code","Vendor","Vendor Code","Color"]].head(10))
+        # Δείγματα για Color extraction (δείχνει πηγή + εξαγόμενο)
+        try:
+            sample_df = stock[[vv_col_stock]].copy().rename(columns={vv_col_stock:"Variant Values"}).head(12)
+            sample_df["Extracted Color"] = sample_df["Variant Values"].apply(extract_color_after_keyword)
+            st.write(sample_df)
+        except Exception:
+            pass
 
     st.success("Done! Preview below ↓")
     st.dataframe(out, use_container_width=True)
