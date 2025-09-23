@@ -13,7 +13,7 @@ import streamlit as st
 
 # ---------------- UI ----------------
 st.set_page_config(page_title="Dynamic Restock v1", page_icon="📦", layout="wide")
-st.title("📦 Dynamic Restock v11")
+st.title("📦 Dynamic Restock v1")
 st.caption("Upload Stock + Sales → dynamic restock. Vendor/Code/Color mapped explicitly from Sales.")
 
 # ---------------- Helpers ----------------
@@ -333,4 +333,5 @@ if run_btn:
         file_name="dynamic_restock_order_v12.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
