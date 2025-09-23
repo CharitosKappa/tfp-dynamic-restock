@@ -1,6 +1,7 @@
 # app.py
-# Dynamic Restock v12 – Streamlit web app
+# Dynamic Restock v12 – Streamlit web app (with Vendor, Vendor Code, Vendor Color fixed)
 # Requirements: streamlit, pandas, numpy, openpyxl
+# Run: streamlit run app.py
 
 import io
 import re
@@ -9,33 +10,30 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ---------------- UI ----------------
 st.set_page_config(page_title="Dynamic Restock v12", page_icon="📦", layout="wide")
 st.title("📦 Dynamic Restock v12")
 st.caption("Upload 2 Excel files (Stock + Sales) → get dynamic restock recommendations.")
 
-# ---------- Helpers ----------
+# ---------------- Helpers ----------------
 def to_int_safe(x):
     try:
         if pd.isna(x):
             return 0
-        # handle floats that are really ints (e.g., 123.0)
         return int(float(str(x).strip()))
     except Exception:
         return 0
 
 def clean_our_code(x):
-    """Make sure Our Code is 8-digit string, strip .0, spaces, etc."""
+    """Normalize to 8-digit string (strip .0, keep digits only)."""
     if pd.isna(x):
         return None
     s = str(x).strip()
-    # remove trailing .0 if present
     if s.endswith(".0"):
         s = s[:-2]
-    # keep only digits
     s = re.sub(r"\D", "", s)
     if len(s) == 0:
         return None
-    # pad/truncate to 8 (spec assumes 8-digit)
     if len(s) < 8:
         s = s.zfill(8)
     elif len(s) > 8:
@@ -43,24 +41,17 @@ def clean_our_code(x):
     return s
 
 def extract_size_from_variant_values(text):
-    """
-    From stock 'Variant Values' grab EU size (36-42).
-    Accepts formats like 'Μέγεθος: 38 | Χρώμα: Μπεζ', 'Size: 39', '38'
-    """
+    """Extract EU size 36–42 from 'Variant Values' or free text."""
     if pd.isna(text):
         return None
     s = str(text)
-    # common patterns
     m = re.search(r"(3[6-9]|4[0-2])\b", s)
     if m:
         return int(m.group(1))
     return None
 
 def extract_color_from_variant_values(text):
-    """
-    From 'Variant Values' extract color after 'Χρώμα:' or 'Color:'.
-    Fallback: None if not found.
-    """
+    """Extract color after 'Χρώμα:' or 'Color:' from 'Variant Values' text."""
     if pd.isna(text):
         return None
     s = str(text)
@@ -70,23 +61,14 @@ def extract_color_from_variant_values(text):
     return None
 
 def build_variant_sku(our_code8, size):
-    """
-    11-digit Variant SKU rule:
-    OurCode(8) + (Size-34).zfill(3)  → e.g., size=36 => suffix 002
-    """
+    """11-digit SKU: OurCode(8) + (Size-34).zfill(3)."""
     if our_code8 is None or pd.isna(size):
         return None
     suffix = str(int(size) - 34).zfill(3)
     return f"{our_code8}{suffix}"
 
 def base_target_for_size(size):
-    """
-    BaseTarget:
-      38–39 → 6
-      37–40 → 4
-      41    → 2
-      36–42 → 1
-    """
+    """Base Target rules."""
     try:
         s = int(size)
     except Exception:
@@ -107,24 +89,31 @@ def clip(x, lo, hi):
     except Exception:
         return lo
 
-# ---------- Sidebar Inputs ----------
+def pick_existing_col(df, candidates):
+    """Return first existing column name from candidates list, else None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+# ---------------- Sidebar Inputs ----------------
 st.sidebar.header("⚙️ Settings")
 stock_sheet = st.sidebar.text_input("Stock sheet name", value="Sheet1")
 sales_sheet = st.sidebar.text_input("Sales sheet name", value="Sales Analysis")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Column assumptions:")
+st.sidebar.caption("Expected columns (auto-fallbacks exist):")
 st.sidebar.code("""Stock:
 - 'Variant Values' includes size/color info
-- 'Color SKU' (8-digit) or something convertible
-- 'Vendor','Vendor Code','Color','On Hand','Forecasted'
+- 'Color SKU' (8-digit), 'Vendor', 'Vendor Code', 'Vendor Color'
+- 'On Hand', 'Forecasted'
 
 Sales:
-- SKU text in a column like 'Unnamed: 0' with pattern '[12345678901]'
-- 'Total' column has quantity
+- A column containing text like '... [12345678901]' (SKU in brackets)
+- 'Total' with quantity
 """)
 
-# ---------- File Upload ----------
+# ---------------- File Upload ----------------
 col1, col2 = st.columns(2)
 with col1:
     stock_file = st.file_uploader("📂 Upload STOCK Excel", type=["xlsx", "xls"])
@@ -154,27 +143,48 @@ if run_btn:
     # ---------- 2) Clean Stock ----------
     stock = stock_raw.copy()
 
-    # Forward fill for Color, Vendor across size rows (as per doc)
-    for col in ["Color", "Vendor", "Vendor Code", "Color SKU"]:
-        if col in stock.columns:
-            stock[col] = stock[col].ffill()
+    # Detect vendor-related columns (robust to variants)
+    vendor_col = pick_existing_col(stock, ["Vendor", "vendor", "Manufacturer"])
+    vendor_code_col = pick_existing_col(stock, ["Vendor Code", "VendorCode", "vendor_code", "Manufacturer Code"])
+    vendor_color_col = pick_existing_col(stock, ["Vendor Color", "VendorColour", "Vendor colour", "Χρώμα", "Color", "colour"])
 
-    # Extract color from 'Variant Values' where missing
-    if "Variant Values" in stock.columns:
-        vv_color = stock["Variant Values"].apply(extract_color_from_variant_values)
-        if "Color" in stock.columns:
-            stock["Color"] = stock["Color"].fillna(vv_color)
-        else:
-            stock["Color"] = vv_color
-        # Extract size
-        stock["Size"] = stock["Variant Values"].apply(extract_size_from_variant_values)
+    # Forward-fill the known columns to propagate parent rows into size rows
+    for c in [vendor_col, vendor_code_col, vendor_color_col, "Color SKU"]:
+        if c and c in stock.columns:
+            stock[c] = stock[c].ffill()
+
+    # Ensure 'Vendor' and 'Vendor Code' columns exist
+    if not vendor_col:
+        stock["Vendor"] = None
+        vendor_col = "Vendor"
+    if not vendor_code_col:
+        stock["Vendor Code"] = None
+        vendor_code_col = "Vendor Code"
+
+    # Ensure 'Vendor Color' column exists and is filled
+    if "Vendor Color" not in stock.columns:
+        stock["Vendor Color"] = None
+        if vendor_color_col and vendor_color_col != "Vendor Color":
+            stock["Vendor Color"] = stock[vendor_color_col]
+        # fill from Variant Values parsing where missing
+        if "Variant Values" in stock.columns:
+            vv_color = stock["Variant Values"].apply(extract_color_from_variant_values)
+            stock["Vendor Color"] = stock["Vendor Color"].fillna(vv_color)
+        stock["Vendor Color"] = stock["Vendor Color"].ffill()
     else:
-        # Try fallback 'Size' if already present; otherwise we cannot proceed
-        if "Size" not in stock.columns:
-            st.error("Stock sheet must contain 'Variant Values' or a usable 'Size' column.")
-            st.stop()
+        # top up Vendor Color from Variant Values if empty
+        if "Variant Values" in stock.columns:
+            vv_color = stock["Variant Values"].apply(extract_color_from_variant_values)
+            stock["Vendor Color"] = stock["Vendor Color"].fillna(vv_color)
+        stock["Vendor Color"] = stock["Vendor Color"].ffill()
 
-    # Keep only rows that have sizes 36–42
+    # Sizes
+    if "Variant Values" in stock.columns:
+        stock["Size"] = stock["Variant Values"].apply(extract_size_from_variant_values)
+    elif "Size" not in stock.columns:
+        st.error("Stock sheet must contain 'Variant Values' or a usable 'Size' column.")
+        st.stop()
+
     stock["Size"] = stock["Size"].apply(lambda x: int(x) if pd.notna(x) and str(x).isdigit() else x)
     stock = stock[stock["Size"].isin([36, 37, 38, 39, 40, 41, 42])].copy()
 
@@ -189,11 +199,6 @@ if run_btn:
             st.error("Need either 'Color SKU' or 'Our Code' in Stock data.")
             st.stop()
 
-    # Vendor / Vendor Code passthrough
-    for c in ["Vendor", "Vendor Code"]:
-        if c not in stock.columns:
-            stock[c] = None
-
     # On Hand / Forecasted to int
     for c in ["On Hand", "Forecasted"]:
         if c in stock.columns:
@@ -206,13 +211,13 @@ if run_btn:
         lambda r: build_variant_sku(r["Our Code"], r["Size"]), axis=1
     )
 
-    # Groupby unique variant rows
+    # Groupby to one row per variant
     stock_grp = (
         stock.groupby(["Our Code", "Variant SKU", "Size"], as_index=False)
         .agg({
             "Vendor": "first",
             "Vendor Code": "first",
-            "Color": "first",
+            "Vendor Color": "first",
             "On Hand": "max",
             "Forecasted": "max",
         })
@@ -221,15 +226,16 @@ if run_btn:
     # ---------- 3) Clean Sales ----------
     sales = sales_raw.copy()
 
-    # find the column that holds SKU text like "... [12345678901]"
-    # heuristic: pick first object column containing '[' and ']'
+    # Find the column containing '[123456...]'
     sku_col = None
     for c in sales.columns:
-        if sales[c].astype(str).str.contains(r"\[\d+\]").any():
-            sku_col = c
-            break
+        try:
+            if sales[c].astype(str).str.contains(r"\[\d+\]").any():
+                sku_col = c
+                break
+        except Exception:
+            continue
     if sku_col is None:
-        # fallback: try a column literally named 'Unnamed: 0'
         if "Unnamed: 0" in sales.columns:
             sku_col = "Unnamed: 0"
         else:
@@ -237,9 +243,7 @@ if run_btn:
             st.stop()
 
     # Extract Variant SKU from square brackets
-    sales["Variant SKU"] = (
-        sales[sku_col].astype(str).str.extract(r"\[(\d+)\]").iloc[:, 0]
-    )
+    sales["Variant SKU"] = sales[sku_col].astype(str).str.extract(r"\[(\d+)\]").iloc[:, 0]
 
     # Qty Ordered from 'Total'
     if "Total" not in sales.columns:
@@ -271,7 +275,7 @@ if run_btn:
         how="left"
     )
     df["Sales Color Total"] = df["Sales Color Total"].fillna(0).astype(int)
-    df.drop(columns=["ColorSKU"], errors="ignore")
+    df = df.drop(columns=["ColorSKU"], errors="ignore")
 
     # ---------- 5) Targets ----------
     # 5.1 Base Target
@@ -285,11 +289,10 @@ if run_btn:
     df = df.merge(base_sum_per_color, on="Our Code", how="left")
     df["BaseSumColor"] = df["BaseSumColor"].replace(0, np.nan)
     df["GlobalMult"] = (df["Sales Color Total"] / df["BaseSumColor"])
-    df["GlobalMult"] = df["GlobalMult"].fillna(0)  # if BaseSumColor=0 and SalesColorTotal=0 → 0, will be clipped next
+    df["GlobalMult"] = df["GlobalMult"].fillna(0)
     df["GlobalMult"] = df["GlobalMult"].apply(lambda x: clip(x, 0.5, 5.0))
 
     # 5.3 Size Multiplier
-    # AvgSalesPerSize per color (Our Code)
     avg_sales_per_color = (
         df.groupby("Our Code", as_index=False)["Qty Ordered"].mean()
         .rename(columns={"Qty Ordered": "AvgSalesPerSize"})
@@ -303,14 +306,13 @@ if run_btn:
         q = row["Qty Ordered"]
         avg = row["AvgSalesPerSize"]
         if pd.isna(avg) or avg == 0:
-            return 1.0  # neutral if avg missing
+            return 1.0
         val = q / avg
         return clip(val, 0.5, 2.0)
 
     df["SizeMult"] = df.apply(compute_size_mult, axis=1)
 
     # 5.4 Adjusted Target (aggressive + refined rule)
-    # val = BaseTarget × GlobalMult × SizeMult
     df["AdjRaw"] = df["Base Target"] * df["GlobalMult"] * df["SizeMult"]
 
     # Boost +20% if Sales > 2 × BaseTarget
@@ -320,16 +322,14 @@ if run_btn:
         df["AdjRaw"]
     )
 
-    # ceil
+    # ceil and floor by Base Target
     df["AdjCeil"] = df["AdjRaw"].apply(lambda x: int(math.ceil(x)) if pd.notna(x) else 0)
-
-    # Adjusted = max(ceil(val), BaseTarget)
     df["Adjusted Target"] = df[["AdjCeil", "Base Target"]].max(axis=1)
 
     # Zero-sales rule: if Sales == 0 → Adjusted = 0
     df.loc[df["Qty Ordered"] == 0, "Adjusted Target"] = 0
 
-    # Refinement for core sizes (38–39–40)
+    # Core sizes refinement: 38–39–40 if color sells but zero stock/forecast/sales on this variant
     core_mask = (
         (df["Qty Ordered"] == 0) &
         (df["On Hand"] == 0) &
@@ -344,7 +344,8 @@ if run_btn:
 
     # ---------- 7) Final file ----------
     final_cols = [
-        "Vendor", "Vendor Code", "Color", "Our Code", "Variant SKU", "Size",
+        "Vendor", "Vendor Code", "Vendor Color",     # first 3 columns (fixed)
+        "Our Code", "Variant SKU", "Size",
         "On Hand", "Forecasted", "Qty Ordered", "Sales Color Total",
         "Base Target", "GlobalMult", "SizeMult", "Adjusted Target",
         "Restock Quantity"
@@ -363,7 +364,7 @@ if run_btn:
     st.success("Done! Preview below ↓")
     st.dataframe(out, use_container_width=True)
 
-    # Offer download
+    # Download
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         out.to_excel(writer, index=False, sheet_name="Restock v12")
@@ -374,15 +375,15 @@ if run_btn:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# ---------- How to run (shown when app loads) ----------
+# ---------- Help panel ----------
 with st.expander("ℹ️ How to run"):
     st.markdown("""
 1) Install Python 3.10+  
 2) `pip install streamlit pandas numpy openpyxl`  
-3) Save this file as `app.py`  
+3) Save as `app.py`  
 4) Run: `streamlit run app.py`  
 5) Upload:
    - **Stock**: e.g. `Product Variant (2).xlsx` (sheet `Sheet1`)
    - **Sales**: e.g. `Pivot Sales Analysis (3).xlsx` (sheet `Sales Analysis`)
-6) Optionally change sheet names in the sidebar.
+6) Adjust sheet names from the sidebar if needed.
 """)
