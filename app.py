@@ -1,6 +1,6 @@
 # app.py
 # Dynamic Restock v12 – Streamlit app
-# Vendor fields from Sales with robust detection + safe Vendor Color (no Color SKU)
+# Vendor fields mapped from SALES (1) per Variant SKU, (2) per Our Code fallback, then STOCK fallback
 # Requirements: streamlit, pandas, numpy, openpyxl
 
 import io, re, math
@@ -9,9 +9,9 @@ import pandas as pd
 import streamlit as st
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Dynamic Restock v12", page_icon="📦", layout="wide")
-st.title("📦 Dynamic Restock v1")
-st.caption("Upload Stock + Sales → dynamic restock. Vendor/Vendor Code/Vendor Color mapped from Sales.")
+st.set_page_config(page_title="Dynamic Restock v1", page_icon="📦", layout="wide")
+st.title("📦 Dynamic Restock v12")
+st.caption("Upload Stock + Sales → dynamic restock. Vendor/Vendor Code/Vendor Color mapped from Sales (variant-first).")
 
 # ---------------- Helpers ----------------
 def to_int_safe(x):
@@ -30,7 +30,6 @@ def clean_our_code(x):
     return s.zfill(8)[:8]
 
 def extract_size_from_variant_values(text):
-    """Extract EU size 36–42 from 'Variant Values' or free text."""
     if pd.isna(text): return None
     m = re.search(r"(3[6-9]|4[0-2])\b", str(text))
     return int(m.group(1)) if m else None
@@ -59,15 +58,11 @@ def clip(x, lo, hi):
     try: return max(lo, min(hi, x))
     except: return lo
 
-# ---------- Column detection (robust) ----------
+# ---------- Column detection ----------
 def _norm(s):
     return re.sub(r"[\s/_\-]+", "", str(s).strip().lower())
 
 def find_col(df, tokens, *, exclude_tokens=None):
-    """
-    Βρες στήλη που περιέχει ΟΛΑ τα tokens στο normalized name.
-    Μπορείς να δώσεις exclude_tokens (κανένα να μην περιέχεται).
-    """
     toks = [t.lower() for t in (tokens if isinstance(tokens, (list,tuple)) else [tokens])]
     excl = [t.lower() for t in (exclude_tokens or [])]
     for c in df.columns:
@@ -77,7 +72,6 @@ def find_col(df, tokens, *, exclude_tokens=None):
     return None
 
 def find_any_col(df, list_of_token_sets, *, exclude_tokens=None):
-    """Δοκίμασε διαδοχικά διαφορετικά token sets μέχρι να βρεθεί στήλη."""
     for tokens in list_of_token_sets:
         col = find_col(df, tokens, exclude_tokens=exclude_tokens)
         if col: return col
@@ -117,7 +111,6 @@ if run_btn:
     # 2) STOCK essentials
     stock = stock_raw.copy()
 
-    # Size
     vv_col_stock = find_any_col(stock, [["variant","values"]]) or ("Variant Values" if "Variant Values" in stock.columns else None)
     if vv_col_stock:
         stock["Size"] = stock[vv_col_stock].apply(extract_size_from_variant_values)
@@ -129,7 +122,6 @@ if run_btn:
     stock["Size"] = stock["Size"].apply(lambda x: int(x) if pd.notna(x) and str(x).isdigit() else x)
     stock = stock[stock["Size"].isin([36,37,38,39,40,41,42])].copy()
 
-    # Our Code
     color_sku_col = find_col(stock, ["color","sku"]) or ("Color SKU" if "Color SKU" in stock.columns else None)
     our_code_col_stock = "Our Code" if "Our Code" in stock.columns else None
     if color_sku_col:
@@ -139,13 +131,12 @@ if run_btn:
     else:
         st.error("Stock needs 'Color SKU' or 'Our Code'."); st.stop()
 
-    # On Hand / Forecasted
     onhand_col = find_any_col(stock, [["on","hand"]]) or ("On Hand" if "On Hand" in stock.columns else None)
     forecast_col = find_any_col(stock, [["forecast"]]) or ("Forecasted" if "Forecasted" in stock.columns else None)
     stock["On Hand"] = stock[onhand_col].apply(to_int_safe) if onhand_col else 0
     stock["Forecasted"] = stock[forecast_col].apply(to_int_safe) if forecast_col else 0
 
-    # Stock vendor fallback (exclude Color SKU being mistaken as Vendor Color)
+    # Optional STOCK vendor fallback (not primary)
     vendor_col_stock = find_any_col(stock, [["vendor"],["manufacturer"],["brand"]])
     vendor_code_col_stock = find_any_col(stock, [["vendor","code"],["manufacturer","code"],["brand","code"]])
     vendor_color_col_stock = (
@@ -155,12 +146,11 @@ if run_btn:
     for c in [vendor_col_stock, vendor_code_col_stock, vendor_color_col_stock]:
         if c: stock[c] = stock[c].ffill()
 
-    # Build stock vendor map safely (only existing cols)
+    # Build STOCK vendor map safely
     agg_map = {}
     if vendor_col_stock: agg_map[vendor_col_stock] = "first"
     if vendor_code_col_stock: agg_map[vendor_code_col_stock] = "first"
     if vendor_color_col_stock: agg_map[vendor_color_col_stock] = "first"
-
     if agg_map:
         stock_vendor_map = stock.groupby("Our Code", as_index=False).agg(agg_map)
         rename_map = {}
@@ -184,7 +174,7 @@ if run_btn:
     # 3) SALES parsing
     sales = sales_raw.copy()
 
-    # Variant SKU detection
+    # Detect Variant SKU column
     sku_col = None
     for c in sales.columns:
         try:
@@ -199,8 +189,9 @@ if run_btn:
     if sku_col is None:
         sku_col = "Unnamed: 0" if "Unnamed: 0" in sales.columns else None
     if sku_col is None:
-        st.error("Could not detect a SKU column in Sales (expected something like '[12345678901]')."); st.stop()
+        st.error("Could not detect a SKU column in Sales (expected like '[12345678901]')."); st.stop()
 
+    # Extract Variant SKU & Our Code from Sales
     sales["Variant SKU"] = sales[sku_col].astype(str).str.extract(r"\[(\d+)\]").iloc[:,0]
     mask_no_brackets = sales["Variant SKU"].isna() & sales[sku_col].astype(str).str.fullmatch(r"\d{11}")
     sales.loc[mask_no_brackets, "Variant SKU"] = sales.loc[mask_no_brackets, sku_col].astype(str)
@@ -209,9 +200,10 @@ if run_btn:
     # Quantities
     total_col = find_any_col(sales, [["total"]]) or ("Total" if "Total" in sales.columns else None)
     if not total_col:
-        st.error("Sales must contain a 'Total' column (ordered quantities)."); st.stop()
+        st.error("Sales must contain a 'Total' column."); st.stop()
     sales["Qty Ordered"] = sales[total_col].apply(to_int_safe)
 
+    # Sales aggregations
     sales_by_variant = (
         sales.dropna(subset=["Variant SKU"])
              .groupby("Variant SKU", as_index=False)["Qty Ordered"].sum()
@@ -223,82 +215,95 @@ if run_btn:
     )
 
     # ----- SALES-driven vendor fields -----
-    # Vendor (display name): multiple aliases
-    col_vendor_disp = find_any_col(
-        sales,
-        [
-            ["vendors","display","name"],   # Vendors/Display Name
-            ["vendor","display","name"],    # Vendor/Display Name
-            ["vendor","displayname"],       # Vendor Display Name
-            ["vendor","name"],              # Vendor Name
-            ["supplier","name"],            # Supplier Name
-            ["manufacturer"],               # Manufacturer
-            ["brand"],                      # Brand
-        ]
-    ) or ("Vendors/Display Name" if "Vendors/Display Name" in sales.columns else None)
+    # Exact preferred names (as είπες) + robust fallbacks
+    col_vendor_disp = (
+        "Vendors/Display Name" if "Vendors/Display Name" in sales.columns else
+        find_any_col(sales, [["vendors","display","name"],["vendor","display","name"],["vendor","name"],["supplier","name"],["manufacturer"],["brand"]])
+    )
+    col_vendor_code = (
+        "Vendors/Vendor Product Code" if "Vendors/Vendor Product Code" in sales.columns else
+        find_any_col(sales, [["vendors","vendor","product","code"],["vendor","product","code"],["supplier","product","code"],["manufacturer","code"],["vendorcode"]])
+    )
+    col_variant_values_sales = (
+        "Variant Values" if "Variant Values" in sales.columns else
+        find_any_col(sales, [["variant","values"]])
+    )
 
-    # Vendor Code
-    col_vendor_code = find_any_col(
-        sales,
-        [
-            ["vendors","vendor","product","code"],   # Vendors/Vendor Product Code
-            ["vendor","product","code"],
-            ["supplier","product","code"],
-            ["manufacturer","code"],
-            ["vendorcode"],
-        ]
-    ) or ("Vendors/Vendor Product Code" if "Vendors/Vendor Product Code" in sales.columns else None)
-
-    # Vendor Color from Variant Values (Χρώμα:)
-    col_variant_values_sales = find_any_col(sales, [["variant","values"]]) or ("Variant Values" if "Variant Values" in sales.columns else None)
+    # Build VARIANT-LEVEL map from Sales (highest priority)
+    sales_variant_map_cols = ["Variant SKU"]
+    rename_var = {}
+    if col_vendor_disp:
+        sales_variant_map_cols.append(col_vendor_disp); rename_var[col_vendor_disp] = "Vendor_sales_var"
+    if col_vendor_code:
+        sales_variant_map_cols.append(col_vendor_code); rename_var[col_vendor_code] = "Vendor Code_sales_var"
+    # Vendor Color from Variant Values text (Χρώμα:)
     if col_variant_values_sales:
         sales["__VendorColor_from_sales"] = sales[col_variant_values_sales].apply(extract_color_from_text)
+        sales_variant_map_cols.append("__VendorColor_from_sales"); rename_var["__VendorColor_from_sales"] = "Vendor Color_sales_var"
+
+    if len(sales_variant_map_cols) > 1:
+        sales_variant_map = (
+            sales.dropna(subset=["Variant SKU"])[sales_variant_map_cols]
+                 .groupby("Variant SKU", as_index=False)
+                 .agg(lambda s: s.dropna().iloc[0] if s.dropna().size else np.nan)
+                 .rename(columns=rename_var)
+        )
     else:
-        sales["__VendorColor_from_sales"] = np.nan
+        sales_variant_map = pd.DataFrame(columns=["Variant SKU","Vendor_sales_var","Vendor Code_sales_var","Vendor Color_sales_var"])
 
-    # Build sales_vendor_map ONLY with columns that actually exist
-    cols_for_map = ["Our Code"]
-    rename_sales = {}
+    # Build OUR-CODE-LEVEL map from Sales (fallback if variant missing some fields)
+    sales_color_map_cols = ["Our Code"]
+    rename_color = {}
     if col_vendor_disp:
-        cols_for_map.append(col_vendor_disp); rename_sales[col_vendor_disp] = "Vendor_sales"
+        sales_color_map_cols.append(col_vendor_disp); rename_color[col_vendor_disp] = "Vendor_sales_color"
     if col_vendor_code:
-        cols_for_map.append(col_vendor_code); rename_sales[col_vendor_code] = "Vendor Code_sales"
-    cols_for_map.append("__VendorColor_from_sales"); rename_sales["__VendorColor_from_sales"] = "Vendor Color_sales"
+        sales_color_map_cols.append(col_vendor_code); rename_color[col_vendor_code] = "Vendor Code_sales_color"
+    if col_variant_values_sales:
+        sales_color_map_cols.append("__VendorColor_from_sales"); rename_color["__VendorColor_from_sales"] = "Vendor Color_sales_color"
 
-    def first_non_null(s):
-        s = s.dropna()
-        return s.iloc[0] if not s.empty else np.nan
+    if len(sales_color_map_cols) > 1:
+        sales_color_map = (
+            sales.dropna(subset=["Our Code"])[sales_color_map_cols]
+                 .groupby("Our Code", as_index=False)
+                 .agg(lambda s: s.dropna().iloc[0] if s.dropna().size else np.nan)
+                 .rename(columns=rename_color)
+        )
+    else:
+        sales_color_map = pd.DataFrame(columns=["Our Code","Vendor_sales_color","Vendor Code_sales_color","Vendor Color_sales_color"])
 
-    sales_vendor_map = (
-        sales.dropna(subset=["Our Code"])[cols_for_map]
-             .groupby("Our Code", as_index=False)
-             .agg(first_non_null)
-             .rename(columns=rename_sales)
-    )
     # Ensure columns exist
-    for c in ["Vendor_sales","Vendor Code_sales","Vendor Color_sales"]:
-        if c not in sales_vendor_map.columns: sales_vendor_map[c] = np.nan
+    for c in ["Vendor_sales_var","Vendor Code_sales_var","Vendor Color_sales_var"]:
+        if c not in sales_variant_map.columns: sales_variant_map[c] = np.nan
+    for c in ["Vendor_sales_color","Vendor Code_sales_color","Vendor Color_sales_color"]:
+        if c not in sales_color_map.columns: sales_color_map[c] = np.nan
 
-    # 4) Merge + Vendor resolution
+    # 4) Merge all
     df = stock_grp.merge(sales_by_variant, on="Variant SKU", how="left")
     df["Qty Ordered"] = df["Qty Ordered"].fillna(0).astype(int)
     df = df.merge(sales_by_color, left_on="Our Code", right_on="ColorSKU", how="left").drop(columns=["ColorSKU"], errors="ignore")
     df["Sales Color Total"] = df["Sales Color Total"].fillna(0).astype(int)
 
-    if not sales_vendor_map.empty:
-        df = df.merge(sales_vendor_map[["Our Code","Vendor_sales","Vendor Code_sales","Vendor Color_sales"]], on="Our Code", how="left")
-    else:
-        df["Vendor_sales"] = np.nan; df["Vendor Code_sales"] = np.nan; df["Vendor Color_sales"] = np.nan
+    # Merge variant-level vendor fields
+    df = df.merge(sales_variant_map, on="Variant SKU", how="left")
 
-    if not stock_vendor_map.empty:
-        df = df.merge(stock_vendor_map, on="Our Code", how="left")
-    else:
-        df["Vendor_stock"] = np.nan; df["Vendor Code_stock"] = np.nan; df["Vendor Color_stock"] = np.nan
+    # Merge color-level vendor fields
+    df = df.merge(sales_color_map, on="Our Code", how="left")
 
-    # Final vendor fields with Sales priority (fallback to Stock)
-    df["Vendor"] = df.apply(lambda r: coalesce(r.get("Vendor_sales"), r.get("Vendor_stock")), axis=1)
-    df["Vendor Code"] = df.apply(lambda r: coalesce(r.get("Vendor Code_sales"), r.get("Vendor Code_stock")), axis=1)
-    df["Vendor Color"] = df.apply(lambda r: coalesce(r.get("Vendor Color_sales"), r.get("Vendor Color_stock")), axis=1)
+    # Merge STOCK fallback
+    df = df.merge(stock_vendor_map, on="Our Code", how="left")
+
+    # Resolve final Vendor fields by priority: variant → color → stock
+    df["Vendor"] = df.apply(lambda r: coalesce(r.get("Vendor_sales_var"),
+                                               r.get("Vendor_sales_color"),
+                                               r.get("Vendor_stock")), axis=1)
+
+    df["Vendor Code"] = df.apply(lambda r: coalesce(r.get("Vendor Code_sales_var"),
+                                                    r.get("Vendor Code_sales_color"),
+                                                    r.get("Vendor Code_stock")), axis=1)
+
+    df["Vendor Color"] = df.apply(lambda r: coalesce(r.get("Vendor Color_sales_var"),
+                                                     r.get("Vendor Color_sales_color"),
+                                                     r.get("Vendor Color_stock")), axis=1)
 
     # 5) Targets
     df["Base Target"] = df["Size"].apply(base_target_for_size)
@@ -355,23 +360,16 @@ if run_btn:
     # Diagnostics
     with st.expander("🔎 Diagnostics"):
         det = {
-            "Detected Sales columns": {
+            "Sales columns used": {
                 "SKU": sku_col,
-                "Vendor": col_vendor_disp,
+                "Vendor (preferred)": col_vendor_disp,
                 "Vendor Code": col_vendor_code,
                 "Variant Values (for Vendor Color)": col_variant_values_sales,
-            },
-            "Detected Stock columns": {
-                "Variant Values": vv_col_stock,
-                "Color SKU": color_sku_col,
-                "Our Code": our_code_col_stock,
-                "Vendor (fallback)": vendor_col_stock,
-                "Vendor Code (fallback)": vendor_code_col_stock,
-                "Vendor Color (fallback)": vendor_color_col_stock,
             },
             "Non-null in export": out[["Vendor","Vendor Code","Vendor Color"]].notna().sum().to_dict()
         }
         st.write(det)
+        st.write("Sample rows (first 10):", out[["Our Code","Variant SKU","Vendor","Vendor Code","Vendor Color"]].head(10))
 
     st.success("Done! Preview below ↓")
     st.dataframe(out, use_container_width=True)
