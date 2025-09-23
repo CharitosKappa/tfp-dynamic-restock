@@ -10,7 +10,7 @@ import streamlit as st
 
 # ---------------- UI ----------------
 st.set_page_config(page_title="Dynamic Restock v12", page_icon="📦", layout="wide")
-st.title("📦 Dynamic Restock v12")
+st.title("📦 Dynamic Restock v1")
 st.caption("Upload Stock + Sales → dynamic restock. Vendor/Vendor Code/Vendor Color mapped from Sales.")
 
 # ---------------- Helpers ----------------
@@ -30,6 +30,7 @@ def clean_our_code(x):
     return s.zfill(8)[:8]
 
 def extract_size_from_variant_values(text):
+    """Extract EU size 36–42 from 'Variant Values' or free text."""
     if pd.isna(text): return None
     m = re.search(r"(3[6-9]|4[0-2])\b", str(text))
     return int(m.group(1)) if m else None
@@ -119,7 +120,7 @@ if run_btn:
     # Size
     vv_col_stock = find_any_col(stock, [["variant","values"]]) or ("Variant Values" if "Variant Values" in stock.columns else None)
     if vv_col_stock:
-        stock["Size"] = stock[vv_col_stock].apply(extract_size_from_text)
+        stock["Size"] = stock[vv_col_stock].apply(extract_size_from_variant_values)
     elif "Size" in stock.columns:
         stock["Size"] = stock["Size"]
     else:
@@ -144,10 +145,9 @@ if run_btn:
     stock["On Hand"] = stock[onhand_col].apply(to_int_safe) if onhand_col else 0
     stock["Forecasted"] = stock[forecast_col].apply(to_int_safe) if forecast_col else 0
 
-    # Stock vendor fallback (ΠΡΟΣΟΧΗ: ΜΗΝ ΠΑΡΕΙ Color SKU για Vendor Color)
+    # Stock vendor fallback (exclude Color SKU being mistaken as Vendor Color)
     vendor_col_stock = find_any_col(stock, [["vendor"],["manufacturer"],["brand"]])
     vendor_code_col_stock = find_any_col(stock, [["vendor","code"],["manufacturer","code"],["brand","code"]])
-    # εδώ αποκλείουμε 'sku' & 'code' για να μη διαλέξει 'Color SKU'
     vendor_color_col_stock = (
         find_any_col(stock, [["vendor","color"],["vendor","colour"]], exclude_tokens=["sku","code"])
         or find_any_col(stock, [["color"],["colour"],["χρώμα"]], exclude_tokens=["sku","code"])
@@ -155,21 +155,24 @@ if run_btn:
     for c in [vendor_col_stock, vendor_code_col_stock, vendor_color_col_stock]:
         if c: stock[c] = stock[c].ffill()
 
-    stock_vendor_map = (
-        stock.groupby("Our Code", as_index=False)
-             .agg({
-                 vendor_col_stock: "first" if vendor_col_stock else (lambda s: np.nan),
-                 vendor_code_col_stock: "first" if vendor_code_col_stock else (lambda s: np.nan),
-                 vendor_color_col_stock: "first" if vendor_color_col_stock else (lambda s: np.nan),
-             })
-        if "Our Code" in stock.columns else pd.DataFrame(columns=["Our Code"])
-    )
-    rename_map = {}
-    if vendor_col_stock: rename_map[vendor_col_stock] = "Vendor_stock"
-    if vendor_code_col_stock: rename_map[vendor_code_col_stock] = "Vendor Code_stock"
-    if vendor_color_col_stock: rename_map[vendor_color_col_stock] = "Vendor Color_stock"
-    if not stock_vendor_map.empty:
+    # Build stock vendor map safely (only existing cols)
+    agg_map = {}
+    if vendor_col_stock: agg_map[vendor_col_stock] = "first"
+    if vendor_code_col_stock: agg_map[vendor_code_col_stock] = "first"
+    if vendor_color_col_stock: agg_map[vendor_color_col_stock] = "first"
+
+    if agg_map:
+        stock_vendor_map = stock.groupby("Our Code", as_index=False).agg(agg_map)
+        rename_map = {}
+        if vendor_col_stock: rename_map[vendor_col_stock] = "Vendor_stock"
+        if vendor_code_col_stock: rename_map[vendor_code_col_stock] = "Vendor Code_stock"
+        if vendor_color_col_stock: rename_map[vendor_color_col_stock] = "Vendor Color_stock"
         stock_vendor_map = stock_vendor_map.rename(columns=rename_map)
+    else:
+        stock_vendor_map = pd.DataFrame({"Our Code": stock["Our Code"].dropna().unique()})
+        stock_vendor_map["Vendor_stock"] = np.nan
+        stock_vendor_map["Vendor Code_stock"] = np.nan
+        stock_vendor_map["Vendor Color_stock"] = np.nan
 
     # Variant SKU
     stock["Variant SKU"] = stock.apply(lambda r: build_variant_sku(r["Our Code"], r["Size"]), axis=1)
@@ -220,7 +223,7 @@ if run_btn:
     )
 
     # ----- SALES-driven vendor fields -----
-    # Vendor (display name) – δοκίμασε πολλές παραλλαγές:
+    # Vendor (display name): multiple aliases
     col_vendor_disp = find_any_col(
         sales,
         [
@@ -253,7 +256,7 @@ if run_btn:
     else:
         sales["__VendorColor_from_sales"] = np.nan
 
-    # Build map per Our Code, ONLY with existing columns
+    # Build sales_vendor_map ONLY with columns that actually exist
     cols_for_map = ["Our Code"]
     rename_sales = {}
     if col_vendor_disp:
@@ -292,7 +295,7 @@ if run_btn:
     else:
         df["Vendor_stock"] = np.nan; df["Vendor Code_stock"] = np.nan; df["Vendor Color_stock"] = np.nan
 
-    # Τελικές vendor στήλες: ΠΡΟΤΕΡΑΙΟΤΗΤΑ Sales → fallback Stock
+    # Final vendor fields with Sales priority (fallback to Stock)
     df["Vendor"] = df.apply(lambda r: coalesce(r.get("Vendor_sales"), r.get("Vendor_stock")), axis=1)
     df["Vendor Code"] = df.apply(lambda r: coalesce(r.get("Vendor Code_sales"), r.get("Vendor Code_stock")), axis=1)
     df["Vendor Color"] = df.apply(lambda r: coalesce(r.get("Vendor Color_sales"), r.get("Vendor Color_stock")), axis=1)
