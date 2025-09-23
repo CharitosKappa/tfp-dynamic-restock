@@ -3,8 +3,8 @@
 # Vendor / Vendor Code / Color mapped EXCLUSIVELY from STOCK
 #   Vendor  (export col A) <- Stock['Brand']   (per Our Code)
 #   Vendor Code (col B)    <- Stock['Vendor Code'] OR Stock['Vendors/Vendor Product Code'] (per Our Code)
-#   Color  (col C)         <- parse after "Χρώμα:" from Stock['Variant Values'] (per Our Code)
-# Sales is only used for quantities; all vendor fields come from STOCK.
+#   Color  (col C)         <- parse after "Χρώμα:" (or "Color:") from Stock['Variant Values'] (per Our Code)
+# SALES χρησιμοποιείται μόνο για ποσότητες (Qty Ordered).
 # Requirements: streamlit, pandas, numpy, openpyxl
 
 import io, re, math
@@ -13,8 +13,8 @@ import pandas as pd
 import streamlit as st
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Dynamic Restock v1", page_icon="📦", layout="wide")
-st.title("📦 Dynamic Restock v1")
+st.set_page_config(page_title="Dynamic Restock v13", page_icon="📦", layout="wide")
+st.title("📦 Dynamic Restock v13")
 st.caption("Upload Stock + Sales → dynamic restock. Vendor / Code / Color are mapped from STOCK.")
 
 # ---------------- Helpers ----------------
@@ -35,18 +35,37 @@ def clean_our_code(x):
     return s.zfill(8)[:8]
 
 def extract_size_from_variant_values(text):
+    """Detect EU size 36–42 in free text."""
     if pd.isna(text): return None
     m = re.search(r"(3[6-9]|4[0-2])\b", str(text))
     return int(m.group(1)) if m else None
 
 def extract_color_after_keyword(text):
-    """Return text after 'Χρώμα:' or 'Color:' inside Variant Values."""
-    if pd.isna(text): return None
+    """
+    Επιστρέφει το χρώμα από κείμενο τύπου:
+      "Χρώμα: Ταμπά  Μεγέθη γυναικεία παπούτσια: 36"
+    Κόβει ακριβώς μετά το Χρώμα:/Color: μέχρι να συναντήσει 'Μεγέθη' ή διαχωριστικό ή τέλος.
+    """
+    if pd.isna(text):
+        return None
     s = str(text)
-    m = re.search(r"(?:Χρώμα|Color)\s*:\s*([^|\n\r]+)", s, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else None
+    # ομογενοποίηση κενών
+    s = re.sub(r"\s+", " ", s).strip()
+    # κύριο regex
+    m = re.search(
+        r"(?:Χρώμα|Color)\s*[:：]?\s*"       # λέξη-κλειδί + προαιρετική άνω-κάτω τελεία
+        r"(.+?)"                            # πιάσε το ίδιο το χρώμα (lazy)
+        r"(?=\s*(?:Μεγέθη|Sizes?|Taille|Μέγεθος|,|;|\||$))",  # σταματά πριν από αυτά
+        s, flags=re.IGNORECASE
+    )
+    color = m.group(1).strip() if m else None
+    if color:
+        color = re.sub(r"[\s,;|]+$", "", color).strip()
+        color = color.strip(' "\'“”‘’')
+    return color if color else None
 
 def build_variant_sku(our_code8, size):
+    """11ψήφιο SKU: OurCode(8) + (Size-34).zfill(3)"""
     if our_code8 is None or pd.isna(size): return None
     return f"{our_code8}{str(int(size)-34).zfill(3)}"
 
@@ -114,8 +133,7 @@ if run_btn:
     # ---------- STOCK parsing (authoritative for Vendor fields) ----------
     stock = stock_raw.copy()
 
-    # Detect essential stock columns
-    # Our Code: from 'Color SKU' or 'Our Code'
+    # Our Code: από 'Color SKU' ή 'Our Code'
     color_sku_col_stock = "Color SKU" if "Color SKU" in stock.columns else find_col(stock, ["color","sku"])
     our_code_col_stock = "Our Code" if "Our Code" in stock.columns else None
     if color_sku_col_stock:
@@ -125,7 +143,7 @@ if run_btn:
     else:
         st.error("Stock needs 'Color SKU' or 'Our Code'."); st.stop()
 
-    # Size from Variant Values or existing Size
+    # Size από Variant Values ή Size
     vv_col_stock = "Variant Values" if "Variant Values" in stock.columns else find_any_col(stock, [["variant","values"]])
     if vv_col_stock:
         stock["Size"] = stock[vv_col_stock].apply(extract_size_from_variant_values)
@@ -150,15 +168,15 @@ if run_btn:
         ("Vendors/Vendor Product Code" if "Vendors/Vendor Product Code" in stock.columns else
          find_any_col(stock, [["vendors","vendor","product","code"],["vendor","product","code"],["vendorcode"]]))
     )
-    # Color from Variant Values ('Χρώμα:')
-    # (Exclude 'sku'/'code' to avoid picking 'Color SKU')
-    color_text_col_stock = vv_col_stock  # we will parse color from this text field
-    # Forward-fill brand/code/variant text so size rows inherit header rows
+    # Color από Variant Values ('Χρώμα:' / 'Color:')
+    color_text_col_stock = vv_col_stock
+
+    # forward-fill ώστε οι γραμμές με τα μεγέθη να κληρονομούν τα header rows
     for c in [brand_col, vendor_code_col_stock, color_text_col_stock]:
         if c and c in stock.columns:
             stock[c] = stock[c].ffill()
 
-    # Build a color-level map per Our Code from STOCK
+    # χτίζουμε χάρτη ανά Our Code
     cols_for_stock_map = ["Our Code"]
     rename_map = {}
     if brand_col:
@@ -175,7 +193,6 @@ if run_btn:
              .agg(first_non_null)
              .rename(columns=rename_map)
     )
-    # Ensure canonical columns exist
     for c in ["Vendor_from_stock","Vendor Code_from_stock","Color_from_stock"]:
         if c not in stock_vendor_map.columns: stock_vendor_map[c] = np.nan
 
@@ -188,9 +205,9 @@ if run_btn:
              .agg({"On Hand":"max","Forecasted":"max"})
     )
 
-    # ---------- SALES parsing (only for quantities) ----------
+    # ---------- SALES parsing (μόνο για quantities) ----------
     sales = sales_raw.copy()
-    # detect Variant SKU column for sales qty ([11 digits] or pure 11 digits)
+    # detect Variant SKU column ([11 digits] ή καθαρό 11ψήφιο)
     sku_col = None
     for c in sales.columns:
         try:
@@ -225,13 +242,14 @@ if run_btn:
         sales_by_color = pd.DataFrame(columns=["Our Code","Sales Color Total"])
 
     # ---------- Merge everything ----------
-    # Start from stock variants
     df = stock_grp.copy()
-    # Attach STOCK vendor fields by Our Code
-    df = df.merge(stock_vendor_map[["Our Code","Vendor_from_stock","Vendor Code_from_stock","Color_from_stock"]],
-                  on="Our Code", how="left")
+    # Vendor fields από STOCK
+    df = df.merge(
+        stock_vendor_map[["Our Code","Vendor_from_stock","Vendor Code_from_stock","Color_from_stock"]],
+        on="Our Code", how="left"
+    )
 
-    # Attach sales quantities
+    # Sales quantities
     if not sales_by_variant.empty:
         df = df.merge(sales_by_variant[["Variant SKU","Qty Ordered"]], on="Variant SKU", how="left")
     if "Qty Ordered" not in df.columns:
@@ -244,7 +262,7 @@ if run_btn:
     df["Qty Ordered"] = df["Qty Ordered"].fillna(0).astype(int)
     df["Sales Color Total"] = df["Sales Color Total"].fillna(0).astype(int)
 
-    # Final export columns (rename from stock map)
+    # Τελικές στήλες Vendor/Code/Color
     df.rename(columns={
         "Vendor_from_stock": "Vendor",
         "Vendor Code_from_stock": "Vendor Code",
@@ -328,8 +346,9 @@ if run_btn:
                 "Vendor Code": vendor_code_col_stock,
             },
             "Non-null (Vendor/Code/Color)": out[["Vendor","Vendor Code","Color"]].notna().sum().to_dict(),
-            "Examples": out[["Our Code","Vendor","Vendor Code","Color"]].head(10).to_dict(orient="records"),
         })
+        # Optional sample rows for quick visual check
+        st.write(out[["Our Code","Vendor","Vendor Code","Color"]].head(10))
 
     st.success("Done! Preview below ↓")
     st.dataframe(out, use_container_width=True)
