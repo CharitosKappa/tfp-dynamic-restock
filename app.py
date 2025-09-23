@@ -1,10 +1,10 @@
 # app.py
 # Dynamic Restock v12 – Streamlit app
-# Export mapping:
-#   Vendor       <- SALES['Vendors/Display Name'] (ανά Our Code) | fallback: STOCK['Brand']
-#   Vendor Code  <- STOCK['Vendor Code'] ή STOCK['Vendors/Vendor Product Code'] (ανά Our Code)
-#   Color        <- STOCK['Variant Values'] με regex "Χρώμα: ..." + forward-fill
-# Sales χρησιμοποιείται για Qty/Targets, και για Vendor mapping (ανά Our Code).
+# Export mapping (σύμφωνα με την οδηγία σου):
+#   Vendor       <- STOCK['Vendors/Display Name']
+#   Vendor Code  <- STOCK['Vendors/Vendor Product Code']
+#   Color        <- STOCK['Variant Values'] (regex "Χρώμα:" + forward-fill)
+# Sales μόνο για Qty/Targets.
 # Requirements: streamlit, pandas, numpy, openpyxl
 
 import io, re, math
@@ -13,12 +13,12 @@ import pandas as pd
 import streamlit as st
 from collections import Counter
 
-# ---------------- UI ----------------
+# -------------- UI --------------
 st.set_page_config(page_title="Dynamic Restock v12", page_icon="📦", layout="wide")
 st.title("📦 Dynamic Restock v12")
-st.caption("Vendor από SALES (Vendors/Display Name) ανά Our Code • Vendor Code & Color από STOCK")
+st.caption("Vendor & Vendor Code από STOCK (Vendors/Display Name, Vendors/Vendor Product Code) • Color από STOCK (Χρώμα: … → ffill)")
 
-# ---------------- Helpers ----------------
+# -------------- Helpers --------------
 def to_int_safe(x):
     try:
         if pd.isna(x): return 0
@@ -34,12 +34,15 @@ def clean_our_code(x):
     return s[:8].zfill(8)
 
 def extract_size_from_variant_values(text):
+    """Detect EU size 36–42 in free text."""
     if pd.isna(text): return None
     m = re.search(r"(3[6-9]|4[0-2])\b", str(text))
     return int(m.group(1)) if m else None
 
 def extract_color_from_variant_values(text):
-    """Χρώμα μετά το 'Χρώμα:' (ή 'Color:') έως πριν από 'Μεγ..', 'Size', κόμμα/;/| ή τέλος."""
+    """
+    Πάρε το χρώμα μετά το 'Χρώμα:' (ή 'Color:') και πριν από 'Μεγ..', 'Size', κόμμα/;/| ή τέλος.
+    """
     if pd.isna(text): return np.nan
     s = re.sub(r"\s+", " ", str(text)).strip()
     m = re.search(
@@ -51,26 +54,8 @@ def extract_color_from_variant_values(text):
         color = re.sub(r"[\s,;|]+$", "", color).strip().strip(' "\'“”‘’')
     return color if color else np.nan
 
-def extract_variant_sku_from_text(text):
-    """11ψήφιο SKU από '[###########]' ή σκέτο 11ψήφιο μέσα στο string."""
-    if pd.isna(text): return None
-    s = str(text)
-    m = re.search(r"\[(\d{11})\]", s)
-    if m: return m.group(1)
-    m = re.search(r"(^|\D)(\d{11})(\D|$)", s)
-    return m.group(2) if m else None
-
-def extract_ourcode_from_any_text(text):
-    """Our Code (8 ψηφία) από 11ψήφιο ή από οποιαδήποτε ακολουθία ≥8 ψηφίων."""
-    if pd.isna(text): return None
-    s = str(text)
-    sku = extract_variant_sku_from_text(s)
-    if sku: return clean_our_code(sku[:8])
-    m = re.search(r"\d{8,}", s)
-    if m: return clean_our_code(m.group(0)[:8])
-    return None
-
 def build_variant_sku(our_code8, size):
+    """11ψήφιο SKU: OurCode(8) + (Size-34).zfill(3)"""
     if our_code8 is None or pd.isna(size): return None
     return f"{our_code8}{str(int(size)-34).zfill(3)}"
 
@@ -113,12 +98,12 @@ def coalesce(*vals):
             return v
     return np.nan
 
-# ---------------- Sidebar ----------------
+# -------------- Sidebar --------------
 st.sidebar.header("⚙️ Settings")
 stock_sheet = st.sidebar.text_input("Stock sheet name", value="Sheet1")
 sales_sheet = st.sidebar.text_input("Sales sheet name", value="Sales Analysis")
 
-# ---------------- Uploads ----------------
+# -------------- Uploads --------------
 c1, c2 = st.columns(2)
 with c1: stock_file = st.file_uploader("📂 Upload STOCK Excel", type=["xlsx","xls"])
 with c2: sales_file = st.file_uploader("📂 Upload SALES Excel", type=["xlsx","xls"])
@@ -128,7 +113,7 @@ if run_btn:
     if not stock_file or not sales_file:
         st.error("Please upload both STOCK and SALES files."); st.stop()
 
-    # ---------- Read ----------
+    # 1) Read
     try:
         stock = pd.read_excel(stock_file, sheet_name=stock_sheet, dtype=object)
     except Exception as e:
@@ -138,8 +123,8 @@ if run_btn:
     except Exception as e:
         st.error(f"Failed to read SALES sheet '{sales_sheet}': {e}"); st.stop()
 
-    # ---------- STOCK parsing ----------
-    # Our Code (8-digit) από Stock
+    # 2) STOCK essentials
+    # Our Code
     color_sku_col = "Color SKU" if "Color SKU" in stock.columns else find_col(stock, ["color","sku"])
     our_code_col = "Our Code" if "Our Code" in stock.columns else None
     if color_sku_col:
@@ -170,74 +155,39 @@ if run_btn:
     stock["On Hand"] = stock[onhand_col].apply(to_int_safe) if onhand_col else 0
     stock["Forecasted"] = stock[forecast_col].apply(to_int_safe) if forecast_col else 0
 
-    # Vendor Code από STOCK (ffill) | Brand ως fallback Vendor
-    brand_col = "Brand" if "Brand" in stock.columns else find_col(stock, ["brand"])
-    vendor_code_col = (
-        "Vendor Code" if "Vendor Code" in stock.columns else
-        ("Vendors/Vendor Product Code" if "Vendors/Vendor Product Code" in stock.columns else
-         find_any_col(stock, [["vendors","vendor","product","code"],["vendor","product","code"],["vendorcode"]]))
-    )
-    for c in [brand_col, vendor_code_col]:
-        if c and c in stock.columns:
-            stock[c] = stock[c].ffill()
+    # ---- Vendors από STOCK, όπως ζήτησες ----
+    vendor_disp_col = "Vendors/Display Name" if "Vendors/Display Name" in stock.columns else \
+        find_any_col(stock, [["vendors","display","name"], ["vendor","display","name"]])
+    vendor_code_col = "Vendors/Vendor Product Code" if "Vendors/Vendor Product Code" in stock.columns else \
+        find_any_col(stock, [["vendors","vendor","product","code"], ["vendor","product","code"], ["vendorcode"]])
 
-    # Build Variant SKU & group (κρατάμε ColorName από STOCK)
+    if not vendor_disp_col or not vendor_code_col:
+        st.error("Στο STOCK λείπουν οι στήλες 'Vendors/Display Name' ή 'Vendors/Vendor Product Code'."); st.stop()
+
+    # αντιγραφή σε καθαρές στήλες
+    stock["Vendor"] = stock[vendor_disp_col]
+    stock["Vendor Code"] = stock[vendor_code_col]
+
+    # ffill ώστε να μεταφέρονται στα size rows
+    for c in ["Vendor", "Vendor Code"]:
+        stock[c] = stock[c].ffill()
+
+    # Build Variant SKU & group
     stock["Variant SKU"] = stock.apply(lambda r: build_variant_sku(r["Our Code"], r["Size"]), axis=1)
+
+    # Ομαδοποίηση: κρατάμε OnHand/Forecasted max, και για Vendor/Vendor Code/ColorName παίρνουμε mode (σταθερό ανά Our Code)
     stock_grp = (
         stock.groupby(["Our Code","Variant SKU","Size"], as_index=False)
-             .agg({"On Hand":"max","Forecasted":"max","ColorName": mode_non_null})
+             .agg({
+                 "On Hand": "max",
+                 "Forecasted": "max",
+                 "ColorName": mode_non_null,
+                 "Vendor": mode_non_null,
+                 "Vendor Code": mode_non_null,
+             })
     )
 
-    # VendorCode map (ανά Our Code) από STOCK
-    tmp_vendor_code = pd.DataFrame({"Our Code": stock["Our Code"]})
-    tmp_vendor_code["__VendorCode"] = stock[vendor_code_col] if vendor_code_col else np.nan
-    stock_vendor_code_map = (
-        tmp_vendor_code.groupby("Our Code", as_index=False)
-                       .agg({"__VendorCode": mode_non_null})
-                       .rename(columns={"__VendorCode":"Vendor Code"})
-    )
-
-    # Brand map για fallback Vendor (ανά Our Code)
-    if brand_col:
-        stock_brand_map = (
-            stock.groupby("Our Code", as_index=False)[brand_col]
-                 .agg(mode_non_null)
-                 .rename(columns={brand_col: "Vendor_fallback_brand"})
-        )
-    else:
-        stock_brand_map = pd.DataFrame(columns=["Our Code","Vendor_fallback_brand"])
-
-    # ---------- SALES parsing ----------
-    # 1) Βρες στήλη "Vendors/Display Name" (robust)
-    vendor_disp_col_sales = "Vendors/Display Name" if "Vendors/Display Name" in sales.columns else \
-        find_any_col(sales, [["vendors","display","name"], ["vendor","display","name"]])
-    # 2) Βρες/φτιάξε Our Code από ΟΠΟΙΑΔΗΠΟΤΕ text στήλη του SALES
-    sales_vendor_map = pd.DataFrame(columns=["Our Code","Vendor_from_sales"])
-    if vendor_disp_col_sales:
-        obj_cols = [c for c in sales.columns if sales[c].dtype == object]
-        pairs = []
-        for c in obj_cols:
-            try:
-                our = sales[c].apply(extract_ourcode_from_any_text)
-                tmp = pd.DataFrame({
-                    "Our Code": our,
-                    "Vendor_from_sales": sales[vendor_disp_col_sales]
-                })
-                tmp = tmp.dropna(subset=["Our Code","Vendor_from_sales"])
-                if not tmp.empty:
-                    pairs.append(tmp)
-            except Exception:
-                continue
-        if pairs:
-            sales_vendor_map = pd.concat(pairs, ignore_index=True)
-            sales_vendor_map["Our Code"] = sales_vendor_map["Our Code"].astype(str)
-            sales_vendor_map["Vendor_from_sales"] = sales_vendor_map["Vendor_from_sales"].astype(str).str.strip()
-            sales_vendor_map = (
-                sales_vendor_map.groupby("Our Code", as_index=False)["Vendor_from_sales"]
-                                .agg(mode_non_null)
-            )
-
-    # Πωλήσεις για targets (προαιρετικό αν υπάρχει Total)
+    # 3) SALES parsing (για πωλήσεις μόνο)
     # Εντοπισμός στήλης με [11ψήφιο] ή καθαρό 11ψήφιο
     sku_col = None
     for c in sales.columns:
@@ -253,6 +203,7 @@ if run_btn:
                     sku_col = c; break
             except Exception:
                 pass
+
     total_col = "Total" if "Total" in sales.columns else find_col(sales, ["total"])
 
     if sku_col is not None and total_col is not None:
@@ -274,38 +225,21 @@ if run_btn:
         sales_by_variant = pd.DataFrame(columns=["Variant SKU","Qty Ordered"])
         sales_by_color = pd.DataFrame(columns=["Our Code","Sales Color Total"])
 
-    # ---------- Merge ----------
+    # 4) Merge
     df = stock_grp.merge(sales_by_variant[["Variant SKU","Qty Ordered"]], on="Variant SKU", how="left")
     df["Qty Ordered"] = df["Qty Ordered"].fillna(0).astype(int)
 
-    if "Our Code" not in df.columns or df["Our Code"].isna().all():
-        df["Our Code"] = df["Variant SKU"].astype(str).str.slice(0,8)
-
+    # Το Our Code υπάρχει ήδη στο stock_grp (κλειδί της ομαδοποίησης)
     if not sales_by_color.empty:
         df = df.merge(sales_by_color, on="Our Code", how="left")
     else:
         df["Sales Color Total"] = 0
     df["Sales Color Total"] = df["Sales Color Total"].fillna(0).astype(int)
 
-    # Vendor Code από STOCK
-    df = df.merge(stock_vendor_code_map, on="Our Code", how="left")
-
-    # Vendor από SALES (ανά Our Code) — ΠΡΟΤΕΡΑΙΟΤΗΤΑ
-    if not sales_vendor_map.empty:
-        df = df.merge(sales_vendor_map, on="Our Code", how="left")
-    else:
-        df["Vendor_from_sales"] = np.nan
-
-    # Fallback Vendor από STOCK Brand (ανά Our Code)
-    df = df.merge(stock_brand_map, on="Our Code", how="left")
-
-    # Τελικές στήλες
-    df["Vendor"] = df.apply(lambda r: coalesce(r.get("Vendor_from_sales"),
-                                               r.get("Vendor_fallback_brand")), axis=1)
+    # Color από STOCK ήδη στο stock_grp ως ColorName
     df.rename(columns={"ColorName":"Color"}, inplace=True)
-    df.rename(columns={"Vendor Code":"Vendor Code"}, inplace=True)  # (no-op, για σαφήνεια)
 
-    # ---------- Targets & Restock ----------
+    # 5) Targets
     df["Base Target"] = df["Size"].apply(base_target_for_size)
     base_sum_per_color = (
         df.groupby("Our Code", as_index=False)["Base Target"].sum()
@@ -313,7 +247,6 @@ if run_btn:
     )
     df = df.merge(base_sum_per_color, on="Our Code", how="left")
     df["BaseSumColor"] = df["BaseSumColor"].replace(0, np.nan)
-
     df["GlobalMult"] = (df["Sales Color Total"] / df["BaseSumColor"]).fillna(0).apply(lambda x: clip(x, 0.5, 5.0))
 
     avg_sales_per_color = (
@@ -330,7 +263,6 @@ if run_btn:
         return clip(row["Qty Ordered"]/avg, 0.5, 2.0)
 
     df["SizeMult"] = df.apply(compute_size_mult, axis=1)
-
     df["AdjRaw"] = df["Base Target"] * df["GlobalMult"] * df["SizeMult"]
     df["AdjRaw"] = np.where(df["Qty Ordered"] > (2*df["Base Target"]), df["AdjRaw"]*1.2, df["AdjRaw"])
     df["AdjCeil"] = df["AdjRaw"].apply(lambda x: int(math.ceil(x)) if pd.notna(x) else 0)
@@ -348,10 +280,10 @@ if run_btn:
     )
     df.loc[core_mask, "Adjusted Target"] = df.loc[core_mask, "Base Target"]
 
-    # Restock quantity
+    # 6) Restock
     df["Restock Quantity"] = (df["Adjusted Target"] - df["Forecasted"]).clip(lower=0)
 
-    # ---------- Export ----------
+    # 7) Export
     final_cols = [
         "Vendor", "Vendor Code", "Color",
         "Our Code", "Variant SKU", "Size",
@@ -369,16 +301,18 @@ if run_btn:
           .reset_index(drop=True)
     )
 
-    # ---------- Diagnostics ----------
+    # Diagnostics
     with st.expander("🔎 Diagnostics"):
         st.write({
-            "Detected SALES vendor column": vendor_disp_col_sales,
-            "sales_vendor_map rows": 0 if sales_vendor_map is None else len(sales_vendor_map),
-            "Rows with Vendor from SALES": int(out["Vendor"].notna().sum()) if "Vendor" in out.columns else 0,
-            "Non-null counts": out[["Vendor","Vendor Code","Color"]].notna().sum().to_dict(),
+            "Using STOCK vendor columns": {
+                "Vendors/Display Name": vendor_disp_col,
+                "Vendors/Vendor Product Code": vendor_code_col,
+            },
+            "Non-null (Vendor/Vendor Code/Color)": out[["Vendor","Vendor Code","Color"]].notna().sum().to_dict(),
         })
-        if not sales_vendor_map.empty:
-            st.write("Sample OurCode → Vendor (from SALES):", sales_vendor_map.head(10))
+        sample = stock[[vv_col, vendor_disp_col, vendor_code_col]].head(10).copy()
+        sample["Extracted Color"] = sample[vv_col].apply(extract_color_from_variant_values)
+        st.write("Stock samples (Vendor, Vendor Code, Extracted Color):", sample)
 
     st.success("Done! Preview below ↓")
     st.dataframe(out, use_container_width=True)
